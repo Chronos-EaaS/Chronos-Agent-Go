@@ -12,3 +12,5 @@ func configureProcess(_ *exec.Cmd) {}
 func openOutput(root *os.Root, name string) (*os.File, error) {
 	return root.Open(name)
 }
+
+func singleFileLink(os.FileInfo) bool { return false }

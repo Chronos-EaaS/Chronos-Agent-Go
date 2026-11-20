@@ -217,7 +217,7 @@ func validXMLRune(r rune) bool {
 		(r >= 0xE000 && r <= 0xFFFD) || r >= 0x10000
 }
 
-func saveAttemptArchive(dir string, names ...string) error {
+func saveAttemptArchive(dir string, entries []driverEvidenceEntry) error {
 	output, err := os.CreateTemp(dir, ".result-")
 	if err != nil {
 		return err
@@ -225,16 +225,12 @@ func saveAttemptArchive(dir string, names ...string) error {
 	defer os.Remove(output.Name())
 	defer output.Close()
 	archive := zip.NewWriter(output)
-	for _, name := range names {
-		data, err := os.ReadFile(filepath.Join(dir, name))
+	for _, evidence := range entries {
+		entry, err := archive.Create(evidence.name)
 		if err != nil {
 			return err
 		}
-		entry, err := archive.Create(name)
-		if err != nil {
-			return err
-		}
-		if _, err := entry.Write(data); err != nil {
+		if _, err := entry.Write(evidence.data); err != nil {
 			return err
 		}
 	}

@@ -34,6 +34,8 @@ func TestAttemptWire(t *testing.T) {
 		name          string
 		cacheBad      bool
 		result        string
+		driverFails   bool
+		driverUnsafe  bool
 		startLost     bool
 		logLost       bool
 		finishLost    bool
@@ -63,6 +65,14 @@ func TestAttemptWire(t *testing.T) {
 			want: []string{"claim", "start", "log", "upload", "fail"}, status: Failed, terminal: true,
 		},
 		{
+			name: "failed driver uploads supplemental evidence", driverFails: true,
+			want: []string{"claim", "start", "log", "upload", "fail"}, status: Failed, terminal: true,
+		},
+		{
+			name: "invalid supplemental evidence fails the attempt", driverUnsafe: true,
+			want: []string{"claim", "start", "log", "upload", "fail"}, status: Failed, terminal: true,
+		},
+		{
 			name: "ambiguous start does not invoke driver", startLost: true,
 			want: []string{"claim", "start"}, status: Setup,
 		},
@@ -81,7 +91,7 @@ func TestAttemptWire(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			const system = "fixture-system"
-			const cemToken = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+			cemToken := strings.Repeat("0123456789abcdef", 4)
 			environment := "system-fixture + local"
 			if tc.cem {
 				environment = "cem-fixture + local"
@@ -98,7 +108,14 @@ func TestAttemptWire(t *testing.T) {
 				"test -z \"${CHRONOS_ATTEMPT_TOKEN:-}\"\ntest -z \"${CHRONOS_AUTHORIZATION:-}\"\n" +
 				"test \"$(cat ../artifacts/payload)\" = fixture\n" +
 				"cat > driver-input.json\nprintf '%s\\n' 'output from driver' >&2\n" +
+				"mkdir -p evidence/metrics\nprintf '%s' 'extra evidence' > evidence/metrics/raw.txt\n" +
 				"printf '%s\\n' '" + resultJSON + "'\n")
+			if tc.driverFails {
+				driver = append(driver, "exit 1\n"...)
+			}
+			if tc.driverUnsafe {
+				driver = append(driver, "ln -s ../driver-input.json evidence/rejected\n"...)
+			}
 			payload := []byte("fixture")
 			driverDigest := fmt.Sprintf("%x", sha256.Sum256(driver))
 			payloadDigest := fmt.Sprintf("%x", sha256.Sum256(payload))
@@ -193,6 +210,10 @@ func TestAttemptWire(t *testing.T) {
 						if fields.Get("reason") == "" {
 							t.Error("failure did not include its reason")
 						}
+						if tc.driverUnsafe && !strings.Contains(fields.Get("reason"), "evidence/rejected") {
+							t.Errorf("failure does not identify the rejected path: %q", fields.Get("reason"))
+						}
+
 						if tc.cacheBad {
 							assertObserved(t, fields, driverDigest, "")
 							if !strings.Contains(fields.Get("reason"), "SHA-256 mismatch") {
@@ -287,7 +308,7 @@ func TestAttemptWire(t *testing.T) {
 				if tc.cacheBad {
 					wantStdout = ""
 				}
-				assertAttemptZIP(t, uploaded, specification, wantStdout)
+				assertAttemptZIP(t, uploaded, specification, wantStdout, !tc.cacheBad)
 			}
 		})
 	}
@@ -333,7 +354,7 @@ func assertDriverInput(t *testing.T, data, specification []byte, dir string, err
 	}
 }
 
-func assertAttemptZIP(t *testing.T, uploaded, specification []byte, stdout string) {
+func assertAttemptZIP(t *testing.T, uploaded, specification []byte, stdout string, haveSupplement bool) {
 	t.Helper()
 	archive, err := zip.NewReader(bytes.NewReader(uploaded), int64(len(uploaded)))
 	if err != nil {
@@ -352,7 +373,14 @@ func assertAttemptZIP(t *testing.T, uploaded, specification []byte, stdout strin
 		}
 		got[file.Name] = string(data)
 	}
-	if len(got) != 4 || got["specification.json"] != string(specification) ||
+	expectedEntries := 4
+	if haveSupplement {
+		expectedEntries++
+		if got["evidence/metrics/raw.txt"] != "extra evidence" {
+			t.Errorf("supplemental evidence is missing from the ZIP: %v", got)
+		}
+	}
+	if len(got) != expectedEntries || got["specification.json"] != string(specification) ||
 		got["stdout.json"] != stdout || !strings.Contains(got["observations.json"], `"attemptId": 734`) {
 		t.Errorf("unexpected ZIP content %v", got)
 	}

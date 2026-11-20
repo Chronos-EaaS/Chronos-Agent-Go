@@ -179,32 +179,44 @@ func (r *AttemptRunner) run(ctx context.Context, client attemptClient, job *atte
 	work := filepath.Join(dir, "work")
 	staging := filepath.Join(dir, "artifacts")
 	paths := make(map[string]string)
+	var workRoot *os.Root
 	if localErr == nil {
 		defer os.RemoveAll(staging)
-		localErr = r.stage(ctx, dir, work, staging, spec, job.Specification, paths, observed.Artifacts)
+		localErr = r.stage(ctx, work, staging, spec, paths, observed.Artifacts)
+	}
+	if localErr == nil {
+		workRoot, localErr = os.OpenRoot(work)
+		if localErr == nil {
+			defer workRoot.Close()
+		}
 	}
 
 	environment, _ := json.Marshal(observed.Environment)
 	artifacts, _ := json.Marshal(observed.Artifacts)
 	evidence := url.Values{"environment": {string(environment)}, "artifacts": {string(artifacts)}}
 	var stdout, stderr []byte
+	var supplement []driverEvidenceEntry
 	if localErr == nil {
 		evidence.Set("status", strconv.Itoa(int(Running)))
 		if err := client.form(ctx, http.MethodPatch, job, "", evidence); err != nil {
 			// A lost start response may hide a committed start. Only the
 			// acknowledged transition authorizes this worker to invoke it.
 			startErr := fmt.Errorf("start attempt %d: %w", job.AttemptID, err)
-			return result, errors.Join(startErr, saveAttemptEvidence(dir, observed, nil, nil, startErr))
+			return result, errors.Join(startErr, saveAttemptEvidence(dir, job.Specification, observed, nil, nil, nil, startErr))
 		}
 		result.Status = Running
 		var monitorErr error
 		stdout, stderr, localErr, monitorErr = r.execute(ctx, client, job, result, spec, work, paths, &observed)
+		var collectErr error
+		supplement, collectErr = collectDriverEvidence(workRoot)
+		localErr = errors.Join(localErr, collectErr)
 		if monitorErr != nil {
-			return result, errors.Join(localErr, monitorErr, saveAttemptEvidence(dir, observed, stdout, stderr, errors.Join(localErr, monitorErr)))
+			runErr := errors.Join(localErr, monitorErr)
+			return result, errors.Join(runErr, saveAttemptEvidence(dir, job.Specification, observed, stdout, stderr, supplement, runErr))
 		}
 	}
 	if dir != "" {
-		localErr = errors.Join(localErr, saveAttemptEvidence(dir, observed, stdout, stderr, localErr))
+		localErr = errors.Join(localErr, saveAttemptEvidence(dir, job.Specification, observed, stdout, stderr, supplement, localErr))
 	}
 
 	// Finalization has its own time budget to preserve failure evidence
@@ -215,11 +227,8 @@ func (r *AttemptRunner) run(ctx context.Context, client attemptClient, job *atte
 	return result, errors.Join(localErr, publishErr)
 }
 
-func (r *AttemptRunner) stage(ctx context.Context, dir, work, staging string, spec commandSpecification, raw json.RawMessage,
+func (r *AttemptRunner) stage(ctx context.Context, work, staging string, spec commandSpecification,
 	paths map[string]string, artifacts map[string]verifiedArtifact) error {
-	if err := os.WriteFile(filepath.Join(dir, attemptSpecName), raw, 0o600); err != nil {
-		return err
-	}
 	if err := os.Mkdir(work, 0o700); err != nil {
 		return err
 	}
@@ -290,18 +299,32 @@ func (r *AttemptRunner) watch(ctx context.Context, client attemptClient, job *at
 	}
 }
 
-func saveAttemptEvidence(dir string, observed attemptObservation, stdout, stderr []byte, runErr error) error {
+func saveAttemptEvidence(dir string, specification []byte, observed attemptObservation, stdout, stderr []byte,
+	supplement []driverEvidenceEntry, runErr error) error {
 	if runErr != nil {
 		observed.Error = runErr.Error()
 	}
-	if err := errors.Join(
-		os.WriteFile(filepath.Join(dir, driverStdout), stdout, 0o600),
-		os.WriteFile(filepath.Join(dir, driverStderr), stderr, 0o600),
-		writeJSON(dir, evidenceName, observed),
-	); err != nil {
+	metadata, err := json.MarshalIndent(observed, "", "  ")
+	if err != nil {
 		return err
 	}
-	return saveAttemptArchive(dir, attemptSpecName, driverStdout, driverStderr, evidenceName)
+	metadata = append(metadata, '\n')
+	entries := []driverEvidenceEntry{
+		{name: attemptSpecName, data: specification},
+		{name: driverStdout, data: stdout},
+		{name: driverStderr, data: stderr},
+		{name: evidenceName, data: metadata},
+	}
+	var localErr error
+	for _, entry := range entries {
+		file, err := os.OpenFile(filepath.Join(dir, entry.name), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err == nil {
+			_, writeErr := file.Write(entry.data)
+			err = errors.Join(writeErr, file.Close())
+		}
+		localErr = errors.Join(localErr, err)
+	}
+	return errors.Join(localErr, saveAttemptArchive(dir, append(entries, supplement...)))
 }
 
 func (a attemptClient) publish(ctx context.Context, job *attemptJob, result *AttemptResult, stderr, stdout []byte,
