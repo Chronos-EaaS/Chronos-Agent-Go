@@ -331,23 +331,32 @@ func (c *Client) UploadZIP(ctx context.Context, id int64, name string, archive i
 		strings.ContainsAny(name, "\r\n\x00") {
 		return errors.New("expected a ZIP filename without path components or controls")
 	}
-	var framing bytes.Buffer
-	multipartWriter := multipart.NewWriter(&framing)
-	if _, err := multipartWriter.CreateFormFile("result", name); err != nil {
-		return err
-	}
-	prefixSize := framing.Len()
-	if err := multipartWriter.Close(); err != nil {
-		return err
-	}
-	frame := framing.Bytes()
-	body := io.MultiReader(bytes.NewReader(frame[:prefixSize]), io.LimitReader(archive, size), bytes.NewReader(frame[prefixSize:]))
-	err, _ := c.request(ctx, http.MethodPost, c.jobURL(true, jobID(id), "action=upload"),
-		multipartWriter.FormDataContentType(), body, int64(len(frame))+size, nil)
+	target := c.jobURL(true, jobID(id), "action=upload")
+	err, _ := c.uploadZIP(ctx, target, "", name, archive, size)
 	return err
 }
 
+func (c *Client) uploadZIP(ctx context.Context, target url.URL, token, name string, archive io.Reader, size int64) (error, bool) {
+	var framing bytes.Buffer
+	multipartWriter := multipart.NewWriter(&framing)
+	if _, err := multipartWriter.CreateFormFile("result", name); err != nil {
+		return err, false
+	}
+	prefixSize := framing.Len()
+	if err := multipartWriter.Close(); err != nil {
+		return err, false
+	}
+	frame := framing.Bytes()
+	body := io.MultiReader(bytes.NewReader(frame[:prefixSize]), io.LimitReader(archive, size), bytes.NewReader(frame[prefixSize:]))
+	return c.requestWithToken(ctx, http.MethodPost, target, token,
+		multipartWriter.FormDataContentType(), body, int64(len(frame))+size, nil)
+}
+
 func (c *Client) request(ctx context.Context, method string, target url.URL, contentType string, body io.Reader, size int64, out any) (error, bool) {
+	return c.requestWithToken(ctx, method, target, "", contentType, body, size, out)
+}
+
+func (c *Client) requestWithToken(ctx context.Context, method string, target url.URL, token, contentType string, body io.Reader, size int64, out any) (error, bool) {
 	// Empty POST bodies and form bodies share this path. The reader wrapper
 	// prevents replay of a mutation through Request.GetBody.
 	if size == 0 {
@@ -364,8 +373,13 @@ func (c *Client) request(ctx context.Context, method string, target url.URL, con
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
 	}
-	if c.authorization != "" && target.Scheme == c.base.Scheme && strings.EqualFold(target.Host, c.base.Host) {
-		req.Header.Set("Authorization", c.authorization)
+	if target.Scheme == c.base.Scheme && strings.EqualFold(target.Host, c.base.Host) {
+		if c.authorization != "" {
+			req.Header.Set("Authorization", c.authorization)
+		}
+		if token != "" {
+			req.Header.Set("X-Chronos-Attempt-Token", token)
+		}
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {

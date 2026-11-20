@@ -83,6 +83,38 @@ If your Control server sits behind an authentication gateway, set
 go to a separate server, pass its HTTP(S) `/api/v1/job` URL with
 `-upload-endpoint`.
 
+### Run a versioned benchmark
+
+If Control has a benchmark binding for `chronos-command@1`, run its jobs with
+`-mode attempt-v1`. Put each artifact from the published binding in a trusted
+local cache, with its lowercase SHA-256 digest as the filename. The agent checks
+the digest and size as it copies each file into a private run directory. Choose
+a stable worker name or let it default to the hostname.
+
+```sh
+chronos-agent -url "$CHRONOS_URL" -mode attempt-v1 -environment local \
+  -artifact-cache /path/to/artifact-cache -worker test-node -once
+```
+
+Use the HTTPS URL of your Control server. Use `-supports system-a,system-b` to
+limit which systems the worker serves. The same mode can take over a job from
+a CEM bootstrapper with `-cem-job-id ID`, the matching `-environment`, and
+the bootstrapper’s credential in `CHRONOS_ATTEMPT_TOKEN`.
+
+The staged driver runs directly as a POSIX executable. It receives one JSON
+object on stdin with `repetitionId`, `attemptId`, `specification`, and
+`artifactPaths`. It uses the frozen specification to prepare and run the
+benchmark, including the configured phase exclusions. Write the result object
+to stdout and diagnostics to stderr. Exit nonzero if the benchmark fails.
+Each output stream has a 1 MiB limit.
+
+The agent keeps the specification and both output streams under `-work-dir`
+and uploads them as an attempt ZIP to the same Control origin. Set the server’s
+PHP upload limit to accommodate these archives. The attempt also records the
+observed host, verified inputs, and driver diagnostics. If the start response
+is lost, the agent leaves the claim for an operator to inspect. Operators can
+abort and reschedule the repetition to create a new attempt.
+
 ### Use the Go library
 
 Add the module to your project.
@@ -93,7 +125,8 @@ go get github.com/Chronos-EaaS/Chronos-Agent-Go@main
 
 Import `github.com/Chronos-EaaS/Chronos-Agent-Go` as `agent`. Use
 `agent.NewClient` to call the Chronos Control v1 job API from your own runner,
-or `agent.NewRunner` to run jobs with the agent’s command adapters.
+or `agent.NewRunner` to run jobs with the agent’s command adapters. Use
+`agent.NewAttemptRunner` for benchmark bindings that use the versioned protocol.
 
 ## Contributing
 
