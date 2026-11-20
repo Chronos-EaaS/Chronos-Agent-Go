@@ -1,162 +1,108 @@
 # Chronos Agent for Go
 
-The Go agent runs local benchmark and system commands for
-[Chronos Control](https://github.com/Chronos-EaaS/Chronos-Control). The module
-contains a v1 client library and a CLI worker. It uses only the Go standard library.
-Build with Go 1.24 or later. The runner targets Linux and macOS.
+Run your benchmarks with [Chronos Control][control]. The command-line agent picks
+up jobs, runs your benchmark commands, and sends logs and results back to
+Control. The Go library lets you add the same integration to an existing
+benchmark runner.
 
-## Build and run
+The agent runs on Linux and macOS. To build or install it from source, you’ll
+need Go 1.24 or newer. There’s also a [Java agent][java-agent].
 
-Install the CLI from the main branch.
+## Getting started
+
+Install the command-line agent with Go.
 
 ```sh
 go install github.com/Chronos-EaaS/Chronos-Agent-Go/cmd/chronos-agent@main
 chronos-agent -help
 ```
 
-To embed the client in a Go program, add it to your module with
-`go get github.com/Chronos-EaaS/Chronos-Agent-Go@main`. Import it as
-`agent "github.com/Chronos-EaaS/Chronos-Agent-Go"` and use `agent.NewClient`
-for v1 requests or `agent.NewRunner` for local execution.
+To try it before connecting to Control, clone this repository and run
+`./examples/synthetic/demo.sh`. The demo runs the
+[included adapter](examples/synthetic/adapter.json) against a temporary local
+server.
 
-To build and test from a clone, run the following from the repository root.
+### Run a benchmark
 
-```sh
-go test -race ./...
-go build -o /tmp/chronos-agent ./cmd/chronos-agent
-/tmp/chronos-agent -help
-./examples/synthetic/demo.sh
-```
-
-The demo builds the CLI, starts a synthetic server on a temporary loopback port,
-runs the included adapter, and checks the request sequence, uploaded ZIP, digests,
-argv, process exit, and empty queue. All demo runs and files use temporary directories.
-
-For a Chronos Control fixture, register the adapter's system identifier and schedule a
-job in the matching `system-<environment>` environment. Set
-`CHRONOS_FIXTURE_URL` to the URL of your fixture. The bundled adapter expects a
-`payload` parameter in the evaluation section. For Chronos Control's seeded
-job 90, use a copy of the adapter with `{{evaluation.quantity}}` as the argument.
-
-```sh
-PATH="$PWD/examples/synthetic:$PATH" /tmp/chronos-agent \
-  -url "$CHRONOS_FIXTURE_URL" -config examples/synthetic/adapter.json \
-  -environment agent -work-dir /tmp/chronos-go-runs -once
-```
-
-Use one worker per overlapping system and environment queue. The v1 system poll is
-a read of a scheduled job. The runner checks the job again before setting it running.
-The check and write are separate requests. Concurrent workers may still select the
-same job. Omit `-once` to keep polling. The worker exits after an unreconciled error
-to allow inspection of the job and its local files. `CHRONOS_AUTHORIZATION` can supply
-an Authorization value for a gateway fronting Control. The current v1 endpoints are
-public at the application layer. Use the scheme required by the gateway.
-
-## Adapter configuration
-
-The configuration maps Chronos system identifiers to local adapters. Each adapter
-declares a subset of the Control lifecycle phases and optional outputs.
+You’ll need a running Chronos Control instance and a job scheduled for the
+system and environment your agent will serve. Create an `adapter.json` file
+keyed by the system identifier in Control. This example runs a program called
+`run-benchmark` from your `PATH` and passes it the job’s `payload` parameter.
 
 ```json
 {
-  "fixture-system": {
+  "my-system": {
     "phases": {
       "execute": {
-        "program": "chronos-synthetic-benchmark",
+        "program": "run-benchmark",
         "args": ["{{evaluation.payload}}"]
       }
     },
-    "version": {
-      "program": "chronos-synthetic-benchmark",
-      "args": ["--version"]
-    },
     "result": "metrics.json",
-    "artifacts": [{"role": "benchmark-output", "path": "payload.txt"}]
+    "artifacts": [{"role": "benchmark-output", "path": "output.txt"}]
   }
 }
 ```
 
-- Phases run in Control order `prepare`, `warmup`, `execute`, `analyze`, `clean`,
-  filtered by the job's phase exclusion bitmask. Each configured phase that
-  runs sets its server phase and reports 100% on successful command completion.
-  A failed or stopped command ends the phase sequence. A command that acquires
-  resources should arrange its own cleanup.
-- Programs are absolute paths or bare names on `PATH`, supplied by the local
-  operator. A whole argument can bind an exact CDL value using
-  `{{evaluation.name}}` or `{{setup.name}}`. Values remain individual arguments,
-  including whitespace and shell metacharacters. The runner invokes the configured
-  executable directly. Choose arguments and option boundaries appropriate for that
-  executable. Arguments that embed values in interpreter code would give that
-  interpreter control of the value.
-- Commands start in a fresh `work/` directory. The child environment contains
-  `CHRONOS_CDL_FILE` pointing to the received XML and whichever of `PATH`, `LANG`,
-  `LC_ALL`, `TZ`, and `TMPDIR` are set in the parent. A workspace is a file
-  collection boundary. The command runs with the operating system privileges of
-  the worker account.
-- `version` is an optional local probe with a five-second timeout within the job
-  timeout. Its output and process outcome are recorded alongside the phase commands.
-- `result` is an optional JSON object or array file, up to 1 MiB. The runner sends
-  its original bytes in the PHP form `result` field on success. Configure
-  result keys to match the system's Chronos result configuration.
-- `artifacts` lists optional-to-configure outputs required for a successful run.
-  Output paths reference regular files inside `work/`. The ZIP contains the captured
-  bytes, a versioned SHA-256 manifest, logs, and observed execution metadata.
-  Manifest URIs are relative to the ZIP root. Files collected from the workload
-  and logs have a combined 64 MiB limit. Chronos PHP upload settings can impose
-  a lower limit.
+Set `CHRONOS_URL` to your Control server’s URL. If the job is scheduled in
+`system-local`, pass `local` as the environment name.
 
-## Lifecycle and evidence
+```sh
+chronos-agent -url "$CHRONOS_URL" -config adapter.json -environment local -once
+```
 
-The client implements the Chronos Control v1 job API. See the
-[v1 PHP controllers](https://github.com/Chronos-EaaS/Chronos-Control/tree/94aae8f360dbadefc05cea3bc654c20823b9b5fa/backend/src/Http/Api/V1)
-and [contract tests](https://github.com/Chronos-EaaS/Chronos-Control/blob/94aae8f360dbadefc05cea3bc654c20823b9b5fa/tests/api/agent-contracts.py).
-Queue code 601 represents an empty queue. The client tries eligible GET requests
-up to three times on transport errors or HTTP 429, 502, 503, and 504. Each request
-has a 15-second default HTTP timeout. The runner sends each mutation once. It checks
-the current job status before publishing log chunks and again before the terminal
-PATCH. The final success PATCH follows successful ZIP upload.
+Leave off `-once` to keep polling for jobs. Give each agent its own queue. If
+two agents poll for the same system and environment, both can pick up the same
+job. If you use CEM, start the agent with
+`-cem-job-id ID` and the matching `-environment` after the CEM bootstrapper
+has prepared the job.
 
-System workers post to `/api/v1/job/id=<id>/action=upload` at the Control origin by
-default. For a separate HTTP(S) upload origin, supply its `/api/v1/job` endpoint
-explicitly with `-upload-endpoint` and configure it to store uploads for the same
-Control instance. The client sends gateway credentials only to the Control origin
-and declines redirects. The SDK can inspect `getUploadTarget` metadata. FTP transport
-and automatic connection to the discovered target are outside this module.
+### Configure your commands
 
-For CEM, the existing bootstrapper provides the node identity, reserves the job,
-performs machine setup, and calls `jobStarted` on the CEM endpoint. Invoke the runner
-with `-cem-job-id ID -environment NAME` once the job is in setup. The runner uses the
-job API for the workload lifecycle. The bootstrapper owns CEM node telemetry and
-termination.
+Each adapter can define commands for `prepare`, `warmup`, `execute`, `analyze`,
+and `clean`. The agent runs them in that order, skipping phases disabled in
+the job. Use `{{evaluation.name}}` or `{{setup.name}}` as a whole argument to
+pass a value from the job’s CDL. The agent passes the value directly to the
+program as one argument.
 
-The worker monitors `GET /api/v1/job/id=<id>` during commands. If Control changes the
-running status, the runner stops the workload and retains local evidence. The job
-timeout reports failure, and local SIGINT or SIGTERM requests abort. Linux and macOS
-cancellation kills the process group. Processes that deliberately leave the group
-are owned by the operator or bootstrapper. In once and CEM modes, the CLI forwards
-ordinary nonzero command exits in the range 1–125, uses 1 for other execution or
-publication errors, and uses 130 for local cancellation.
+Commands start in a fresh working directory. They can read the full job
+configuration from `CHRONOS_CDL_FILE`. If you set `result`, have your command
+write a JSON object or array to that file. List any other files you want to
+collect under `artifacts`. Both kinds of path are relative to the working
+directory. You can also add a `version` command to record the tool’s version
+alongside the job.
 
-Each run writes a new, private directory containing the received CDL,
-`observations.json`, captured `steps.log` when a process was invoked, and the
-collected ZIP and manifest where collection succeeds. Output capture retains the
-first 256 KiB of each command's stdout and stderr, records truncation, and attaches
-the textual log to Control in chunks before completion. Local files from failed
-runs and failed publication remain available. Observations include exact argv,
-resolved executable path, timestamps, process status, available host and Go
-build information, and the CDL digest. Use the version probe to record the
-tool or SUT version when the executable can report it. Avoid passing secrets
-in CDL arguments or writing secrets to logs or declared artifacts.
+Control receives the logs and, on success, the result and a ZIP with the
+collected files and their SHA-256 checksums. The agent keeps a local copy of
+each run under `-work-dir` (default `.chronos-runs`), so you can inspect the
+logs even if a command or upload fails. Use `-timeout` to set a time limit for
+the job’s commands.
 
-The local directory name is a local run identifier. Control v1 stores state and
-evidence by job ID. Atomic claims and planned repetition or attempt identities
-belong to a future capability-aware integration at the client/runner boundary.
-The local process runs once per enabled phase. Read retries cannot add a measurement.
+If your Control server sits behind an authentication gateway, set
+`CHRONOS_AUTHORIZATION` to the header value your gateway expects. If uploads
+go to a separate server, pass its HTTP(S) `/api/v1/job` URL with
+`-upload-endpoint`.
 
-## Checks and license
+### Use the Go library
 
-GitHub Actions runs formatting checks, `go vet`, race-enabled tests, and
-the CLI build on pushes and pull requests targeting `main`. The matrix covers
-Go 1.24 on Linux and the current stable Go release on Linux and macOS.
+Add the module to your project.
 
-[MIT License](LICENSE), under the same notice as Chronos Control.
+```sh
+go get github.com/Chronos-EaaS/Chronos-Agent-Go@main
+```
+
+Import `github.com/Chronos-EaaS/Chronos-Agent-Go` as `agent`. Use
+`agent.NewClient` to call the Chronos Control v1 job API from your own runner,
+or `agent.NewRunner` to run jobs with the agent’s command adapters.
+
+## Contributing
+
+Issues and pull requests are welcome. To run the checks locally, use
+`go vet ./...` and `go test -race ./...`.
+
+## License
+
+[MIT License](LICENSE).
+
+[control]: https://github.com/Chronos-EaaS/Chronos-Control
+[java-agent]: https://github.com/Chronos-EaaS/Chronos-Agent
