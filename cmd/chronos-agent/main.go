@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -27,12 +28,17 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags.SetOutput(stderr)
 	flags.Usage = func() {
 		fmt.Fprintln(stderr, "Usage: chronos-agent -url URL -config FILE [options]")
+		fmt.Fprintln(stderr, "       chronos-agent -url URL -mode attempt-v1 -artifact-cache DIR [options]")
 		fmt.Fprintln(stderr, "Poll a Chronos Control v1 system queue or run a bootstrapped CEM job.")
 		fmt.Fprintln(stderr, "Optional gateway credentials are read from CHRONOS_AUTHORIZATION.")
 		flags.PrintDefaults()
 	}
 	base := flags.String("url", "", "Chronos Control origin or /api/v1 URL")
-	config := flags.String("config", "", "JSON file mapping supported system identifiers to local adapters")
+	mode := flags.String("mode", "legacy", "execution mode (legacy or attempt-v1)")
+	config := flags.String("config", "", "legacy JSON file mapping systems to local adapters")
+	cache := flags.String("artifact-cache", "", "attempt-v1 cache containing files named by SHA-256")
+	worker := flags.String("worker", "", "attempt-v1 worker identifier (defaults to hostname)")
+	supports := flags.String("supports", "", "attempt-v1 system identifiers separated by commas (defaults to any)")
 	environment := flags.String("environment", "default", "Chronos environment name without system- or cem-")
 	work := flags.String("work-dir", ".chronos-runs", "directory for local evidence and workload output")
 	timeout := flags.Duration("timeout", 30*time.Minute, "maximum time for job commands and phase updates")
@@ -47,13 +53,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		}
 		return 2
 	}
-	if flags.NArg() != 0 || *base == "" || *config == "" || *poll <= 0 || *cemJob < 0 || (*once && *cemJob != 0) {
+	if flags.NArg() != 0 || *base == "" || *poll <= 0 || *cemJob < 0 || (*once && *cemJob != 0) {
 		flags.Usage()
-		return 2
-	}
-	adapters, err := loadAdapters(*config)
-	if err != nil {
-		fmt.Fprintln(stderr, "read adapter configuration:", err)
 		return 2
 	}
 	client, err := agent.NewClient(*base, agent.ClientOptions{
@@ -64,22 +65,72 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, err)
 		return 2
 	}
-	runner, err := agent.NewRunner(client, adapters, agent.RunnerOptions{
-		Environment: *environment, WorkDir: *work, Timeout: *timeout, StatusInterval: *status,
-	})
-	if err != nil {
-		fmt.Fprintln(stderr, err)
+	options := agent.RunnerOptions{Environment: *environment, WorkDir: *work, Timeout: *timeout, StatusInterval: *status}
+	var runOne func(context.Context) (*agent.RunResult, int64, error)
+	switch *mode {
+	case "legacy":
+		if *config == "" || *cache != "" || *worker != "" || *supports != "" {
+			flags.Usage()
+			return 2
+		}
+		adapters, err := loadAdapters(*config)
+		if err != nil {
+			fmt.Fprintln(stderr, "read adapter configuration:", err)
+			return 2
+		}
+		runner, err := agent.NewRunner(client, adapters, options)
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 2
+		}
+		runOne = func(ctx context.Context) (*agent.RunResult, int64, error) {
+			if *cemJob != 0 {
+				result, err := runner.RunCEMJob(ctx, *cemJob)
+				return result, 0, err
+			}
+			result, err := runner.RunOnce(ctx)
+			return result, 0, err
+		}
+	case "attempt-v1":
+		if *cache == "" || *config != "" || *upload != "" {
+			flags.Usage()
+			return 2
+		}
+		var systems []string
+		if *supports != "" {
+			systems = strings.Split(*supports, ",")
+		}
+		runner, err := agent.NewAttemptRunner(client, agent.AttemptOptions{
+			RunnerOptions: options, CacheDir: *cache, Worker: *worker, Systems: systems,
+		})
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 2
+		}
+		runOne = func(ctx context.Context) (*agent.RunResult, int64, error) {
+			var result *agent.AttemptResult
+			var err error
+			if *cemJob != 0 {
+				result, err = runner.RunCEMJob(ctx, *cemJob, os.Getenv("CHRONOS_ATTEMPT_TOKEN"))
+			} else {
+				result, err = runner.RunOnce(ctx)
+			}
+			if result == nil {
+				return nil, 0, err
+			}
+			return &result.RunResult, result.AttemptID, err
+		}
+	default:
+		fmt.Fprintf(stderr, "Unknown execution mode %q.\n", *mode)
 		return 2
 	}
 
 	for {
-		var result *agent.RunResult
-		if *cemJob != 0 {
-			result, err = runner.RunCEMJob(ctx, *cemJob)
-		} else {
-			result, err = runner.RunOnce(ctx)
-		}
-		if result != nil {
+		result, attemptID, err := runOne(ctx)
+		if attemptID != 0 {
+			fmt.Fprintf(stdout, "job %d, attempt %d: status %d, terminal report confirmed %t, local evidence %s\n",
+				result.JobID, attemptID, result.Status, result.TerminalReported, result.RunDir)
+		} else if result != nil {
 			fmt.Fprintf(stdout, "job %d: status %d, terminal report acknowledged %t, local evidence %s\n",
 				result.JobID, result.Status, result.TerminalReported, result.RunDir)
 		}

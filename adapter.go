@@ -145,10 +145,14 @@ func runCommand(ctx context.Context, dir, cdlFile, step string, command Command)
 			cmd.Env = append(cmd.Env, name+"="+value)
 		}
 	}
+	return runProcess(ctx, cmd, step, 256<<10)
+}
+
+func runProcess(ctx context.Context, cmd *exec.Cmd, step string, outputLimit int) (commandObservation, []byte, []byte, error) {
 	configureProcess(cmd)
 	cmd.WaitDelay = 2 * time.Second
-	stdout := &commandOutput{}
-	stderr := &commandOutput{}
+	stdout := &commandOutput{limit: outputLimit}
+	stderr := &commandOutput{limit: outputLimit}
 	cmd.Stdout, cmd.Stderr = stdout, stderr
 	observation := commandObservation{
 		Step: step, Path: cmd.Path, Argv: cmd.Args, Started: time.Now().UTC(),
@@ -168,19 +172,20 @@ func runCommand(ctx context.Context, dir, cdlFile, step string, command Command)
 		observation.Error = err.Error()
 		err = &ProcessError{Step: step, ExitCode: observation.ExitCode, Err: err}
 	}
-	return observation, stdout.Bytes(), stderr.Bytes(), err
+	return observation, stdout.buffer.Bytes(), stderr.buffer.Bytes(), err
 }
 
 type commandOutput struct {
-	bytes.Buffer
+	buffer    bytes.Buffer
+	limit     int
 	truncated bool
 }
 
 func (o *commandOutput) Write(data []byte) (int, error) {
-	remaining := 256<<10 - o.Len()
+	remaining := o.limit - o.buffer.Len()
 	if len(data) > remaining {
 		o.truncated = true
 	}
-	_, _ = o.Buffer.Write(data[:min(remaining, len(data))])
+	_, _ = o.buffer.Write(data[:min(remaining, len(data))])
 	return len(data), nil
 }
