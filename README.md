@@ -111,8 +111,8 @@ Each output stream has a 1 MiB limit.
 The agent keeps the specification and both output streams under `-work-dir`
 and uploads them as an attempt ZIP to the same Control origin. To include
 additional output, have the driver write under `evidence/` in its working
-directory. The agent collects up to 64 regular files and 16 MiB in total.
-It examines up to 256 entries and 16 directory levels. Symbolic links, hard
+directory. The agent collects up to 256 regular files and 16 MiB in total.
+It examines up to 512 entries and 16 directory levels. Symbolic links, hard
 links, special files, and limit violations fail the attempt. The archive still
 includes the evidence collected from valid files, including after a failed
 run. Set the server’s PHP upload limit to accommodate these archives. The

@@ -62,7 +62,7 @@ func TestDriverEvidenceLimits(t *testing.T) {
 			}
 		}
 		got, err := collectEvidenceAt(t, work)
-		if len(got) != maxEvidenceFiles || err == nil || !strings.Contains(err.Error(), "64 evidence files") {
+		if len(got) != maxEvidenceFiles || err == nil || !strings.Contains(err.Error(), "256 evidence files") {
 			t.Fatalf("collected %d files, error %v", len(got), err)
 		}
 	})
@@ -108,7 +108,7 @@ func TestDriverEvidenceLimits(t *testing.T) {
 			}
 		}
 		got, err := collectEvidenceAt(t, work)
-		if len(got) != 0 || err == nil || !strings.Contains(err.Error(), "256 entries") {
+		if len(got) != 0 || err == nil || !strings.Contains(err.Error(), "512 entries") {
 			t.Fatalf("unexpected collection result with %d files, error %v", len(got), err)
 		}
 	})

@@ -13,9 +13,9 @@ import (
 
 const (
 	driverEvidenceDir      = "evidence"
-	maxEvidenceFiles       = 64
+	maxEvidenceFiles       = 256
 	maxEvidenceBytes       = 16 << 20
-	maxEvidenceTreeEntries = 256
+	maxEvidenceTreeEntries = 512
 	maxEvidenceDepth       = 16
 )
 
