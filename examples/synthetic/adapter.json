@@ -1,0 +1,18 @@
+{
+  "fixture-system": {
+    "phases": {
+      "execute": {
+        "program": "chronos-synthetic-benchmark",
+        "args": ["{{evaluation.payload}}"]
+      }
+    },
+    "version": {
+      "program": "chronos-synthetic-benchmark",
+      "args": ["--version"]
+    },
+    "result": "metrics.json",
+    "artifacts": [
+      {"role": "benchmark-output", "path": "payload.txt"}
+    ]
+  }
+}
